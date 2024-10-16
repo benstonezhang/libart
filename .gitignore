@@ -7,3 +7,4 @@
 .sconsign.dblite
 *~
 test_runner
+bench

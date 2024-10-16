@@ -12,7 +12,7 @@ SHLINKFLAGS=$(LDFLAGS) -shared
 all:	src/libart.a src/libart.so
 
 clean:
-	rm -f src/*.o src/libart.* tests/*.o test_runner
+	rm -f src/*.o src/libart.* tests/*.o test_runner bench
 
 src/libart.a:	src/libart.o
 	$(AR) r $@ $?
@@ -38,3 +38,9 @@ tests/runner.o:	tests/runner.c tests/test_art.c
 
 test_runner:	tests/runner.o src/libart.so
 	$(LD) $(LDFLAGS) -o $@ $< -Lsrc -Ldeps/check-0.9.8/src/.libs -lcheck -lart
+
+tests/bench.o:	tests/bench.c
+	$(CC) $(CFLAGS) -Isrc -o $@ -c $<
+
+bench:	tests/bench.o src/libart.a
+	$(LD) $(LDFLAGS) -o $@ $?
