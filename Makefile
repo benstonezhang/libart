@@ -1,5 +1,6 @@
 CC=gcc
 LD=gcc
+AR=ar
 PREFIX=/usr/local
 LIBDIR=$(PREFIX)/lib
 INCLUDEDIR=$(PREFIX)/include
@@ -8,10 +9,13 @@ LDFLAGS=-g
 SHCFLAGS=$(CFLAGS) -fPIC
 SHLINKFLAGS=$(LDFLAGS) -shared
 
-all:	src/libart.so
+all:	src/libart.a src/libart.so
 
 clean:
 	rm -f src/*.o src/libart.* tests/*.o test_runner
+
+src/libart.a:	src/libart.o
+	$(AR) r $@ $?
 
 src/libart.so:	src/libart.o
 	$(LD) $(SHLINKFLAGS) -o $@ $<
