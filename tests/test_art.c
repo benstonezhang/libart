@@ -3,8 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <check.h>
-
+#include "check.h"
 #include "art.h"
 
 START_TEST(test_art_init_and_destroy)
@@ -127,8 +126,8 @@ START_TEST(test_art_insert_search)
         buf[len-1] = '\0';
 
         uintptr_t val = (uintptr_t)art_search(&t, (unsigned char*)buf, len);
-	fail_unless(line == val, "Line: %d Val: %" PRIuPTR " Str: %s\n", line,
-	    val, buf);
+        fail_unless(line == val, "Line: %d Val: %" PRIuPTR " Str: %s\n", line,
+            val, buf);
         line++;
     }
 
@@ -178,13 +177,13 @@ START_TEST(test_art_insert_delete)
         // Search first, ensure all entries still
         // visible
         uintptr_t val = (uintptr_t)art_search(&t, (unsigned char*)buf, len);
-	fail_unless(line == val, "Line: %d Val: %" PRIuPTR " Str: %s\n", line,
-	    val, buf);
+        fail_unless(line == val, "Line: %d Val: %" PRIuPTR " Str: %s\n", line,
+            val, buf);
 
         // Delete, should get lineno back
         val = (uintptr_t)art_delete(&t, (unsigned char*)buf, len);
-	fail_unless(line == val, "Line: %d Val: %" PRIuPTR " Str: %s\n", line,
-	    val, buf);
+        fail_unless(line == val, "Line: %d Val: %" PRIuPTR " Str: %s\n", line,
+            val, buf);
 
         // Check the size
         fail_unless(art_size(&t) == nlines - line);
@@ -444,8 +443,8 @@ START_TEST(test_art_insert_search_uuid)
         buf[len-1] = '\0';
 
         uintptr_t val = (uintptr_t)art_search(&t, (unsigned char*)buf, len);
-	fail_unless(line == val, "Line: %d Val: %" PRIuPTR " Str: %s\n", line,
-	    val, buf);
+        fail_unless(line == val, "Line: %d Val: %" PRIuPTR " Str: %s\n", line,
+            val, buf);
         line++;
     }
 

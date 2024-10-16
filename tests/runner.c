@@ -32,4 +32,3 @@ int main(void)
     srunner_free(sr);
     return nf == 0 ? 0 : 1;
 }
-
