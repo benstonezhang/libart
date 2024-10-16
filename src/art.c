@@ -64,9 +64,25 @@ typedef struct {
 
 #ifdef __SSE2__
 #include <emmintrin.h>
-#elif defined(__ARM_NEON__) && defined(FORCE_ARM_NEON)
+#elif defined(__ARM_NEON__)
 #include <arm_neon.h>
 #endif
+
+/* From public domain
+ * https://graphics.stanford.edu/~seander/bithacks.html
+ *
+ * Bit twiddling:
+ * contains_byte:  __builtin_ctz:  for key index:
+ *    0x80000000            0x20               3
+ *      0x800000            0x18               2
+ *      0x808000            0x10               1
+ *          0x80             0x8               0
+ *           0x0             0x0       not found
+ */
+static inline uint32_t word_has_byte(uint32_t v, unsigned char c, uint32_t num) {
+    v = (v ^ (0x01010101UL * c)) | ((~0ULL) << (num << 3));
+    return (v - 0x01010101UL) & ~v & 0x80808080UL;
+}
 
 /**
  * Allocates a node of the given type,
@@ -118,43 +134,31 @@ static void destroy_node(art_node *n) {
     }
 
     // Handle each node type
-    int i, idx;
-    union {
-        art_node4 *p1;
-        art_node16 *p2;
-        art_node48 *p3;
-        art_node256 *p4;
-    } p;
+    int i;
+
     switch (n->type) {
         case NODE4:
-            p.p1 = (art_node4*)n;
-            for (i=0;i<n->num_children;i++) {
-                destroy_node(p.p1->children[i]);
-            }
+            for (i=0;i<n->num_children;i++)
+                destroy_node(((art_node4*)n)->children[i]);
             break;
 
         case NODE16:
-            p.p2 = (art_node16*)n;
-            for (i=0;i<n->num_children;i++) {
-                destroy_node(p.p2->children[i]);
-            }
+            for (i=0;i<n->num_children;i++)
+                destroy_node(((art_node16*)n)->children[i]);
             break;
 
         case NODE48:
-            p.p3 = (art_node48*)n;
             for (i=0;i<256;i++) {
-                idx = ((art_node48*)n)->keys[i]; 
-                if (!idx) continue; 
-                destroy_node(p.p3->children[idx-1]);
+                int idx = ((art_node48*)n)->keys[i];
+                if (!idx) continue;
+                destroy_node(((art_node48*)n)->children[idx-1]);
             }
             break;
 
         case NODE256:
-            p.p4 = (art_node256*)n;
-            for (i=0;i<256;i++) {
-                if (p.p4->children[i])
-                    destroy_node(p.p4->children[i]);
-            }
+            for (i=0;i<256;i++)
+                if (((art_node256*)n)->children[i])
+                    destroy_node(((art_node256*)n)->children[i]);
             break;
 
         default:
@@ -183,70 +187,118 @@ extern inline uint64_t art_size(art_tree *t);
 #endif
 
 static art_node** find_child(art_node *n, unsigned char c) {
-    int i, mask, bitfield;
-    union {
-        art_node4 *p1;
-        art_node16 *p2;
-        art_node48 *p3;
-        art_node256 *p4;
-    } p;
     switch (n->type) {
         case NODE4:
-            p.p1 = (art_node4*)n;
-            for (i=0 ; i < n->num_children; i++) {
-		/* this cast works around a bug in gcc 5.1 when unrolling loops
-		 * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=59124
-		 */
-                if (((unsigned char*)p.p1->keys)[i] == c)
-                    return &p.p1->children[i];
-            }
-            break;
-
         {
-        case NODE16:
-            p.p2 = (art_node16*)n;
+            art_node4 *p = (art_node4*)n;
 
-            // support non-86 architectures
-#ifdef __SSE2__
-                // Compare the key to all 16 stored keys
-                __m128i cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c),
-                        _mm_loadu_si128((__m128i*)p.p2->keys));
-                
-                // Use a mask to ignore children that don't exist
-                mask = (1 << n->num_children) - 1;
-                bitfield = _mm_movemask_epi8(cmp) & mask;
-#else
-                // Compare the key to all 16 stored keys
-                bitfield = 0;
-                for (i = 0; i < 16; ++i) {
-                    if (p.p2->keys[i] == c)
-                        bitfield |= (1 << i);
-                }
+#if defined(__SSE2__) && defined(FORCE_SSE2)
+            // Compare the key to all 4 stored keys
+            __m128i cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c),
+                    _mm_cvtsi32_si128(*(int *)p->keys));
 
-                // Use a mask to ignore children that don't exist
-                mask = (1 << n->num_children) - 1;
-                bitfield &= mask;
-#endif
+            // Use a mask to ignore children that don't exist
+            uint32_t mask = (1UL << n->num_children) - 1;
+            uint32_t bitfield = _mm_movemask_epi8(cmp) & mask;
 
             // If we have a match (any bit set) then we can return
             // the pointer match using ctz to get the index.
             if (bitfield)
-                return &p.p2->children[__builtin_ctz(bitfield)];
+                return &p->children[__builtin_ctz(bitfield)];
+#elif defined(__ARM_NEON__) && defined(FORCE_ARM_NEON)
+            // Compare the key to all 4 stored keys
+            uint8x16_t cmp = vceqq_u8(vdupq_n_u8(c),
+                    vreinterpretq_u8_u32( vsetq_lane_u32(
+                            *(uint32_t *)p->keys, vdupq_n_u32(0), 0)));
+
+            // Use a mask to ignore children that don't exist
+            uint64_t mask = (((uint64_t)1) << (n->num_children << 3)) - 1;
+            uint64_t bitfield = vget_lane_u64(vget_low_u64(
+                    vreinterpretq_u64_u8(cmp)), 0) & mask;
+
+            // If we have a match (any bit set) then we can return
+            // the pointer match using ctz to get the index.
+            if (bitfield)
+#if LONG_WIDTH >= 8
+                return &p->children[__builtin_ctzl(bitfield) >> 3];
+#else
+                return &p->children[__builtin_ctzll(bitfield) >> 3];
+#endif
+#elif __INT_WIDTH__ >= 4
+            uint32_t bitfield = word_has_byte(*(uint32_t*)p->keys, c, n->num_children);
+            if (bitfield)
+                return &p->children[__builtin_ctz(bitfield) >> 3];
+#else
+            for (int i=0 ; i < n->num_children; i++) {
+                // this cast works around a bug in gcc 5.1 when unrolling loops
+                // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=59124
+                if (((unsigned char*)p->keys)[i] == c)
+                    return &p->children[i];
+            }
+#endif
+            break;
+        }
+
+        case NODE16:
+        {
+            art_node16 *p = (art_node16*)n;
+
+#ifdef __SSE2__
+            // Compare the key to all 16 stored keys
+            __m128i cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c),
+                    _mm_loadu_si128((__m128i*)p->keys));
+
+            // Use a mask to ignore children that don't exist
+            uint32_t mask = (1UL << n->num_children) - 1;
+            uint32_t bitfield = _mm_movemask_epi8(cmp) & mask;
+
+            // If we have a match (any bit set) then we can return
+            // the pointer match using ctz to get the index.
+            if (bitfield)
+                return &p->children[__builtin_ctz(bitfield)];
+#elif defined(__ARM_NEON__)
+            // Compare the key to all 16 stored keys
+            uint8x8_t cmp = vshrn_n_u16(vreinterpretq_u16_u8(
+                    vceqq_u8(vdupq_n_u8(c), vld1q_u8(p->keys))), 4);
+
+            // Use a mask to ignore children that don't exist
+            uint64_t mask = (n->num_children == 16) ?
+                    ~0ULL : (1ULL << (n->num_children << 2)) - 1;
+            uint64_t bitfield = vget_lane_u64(vreinterpret_u64_u8(cmp), 0) & mask;
+
+            // If we have a match (any bit set) then we can return
+            // the pointer match using ctz to get the index.
+            if (bitfield)
+#if LONG_WIDTH >= 8
+                return &p->children[__builtin_ctzl(bitfield) >> 2];
+#else
+                return &p->children[__builtin_ctzll(bitfield) >> 2];
+#endif
+#else
+            // Compare the key to all 16 stored keys
+            for (int i = 0; i < n->num_children; i++)
+                if (p->keys[i] == c)
+                    return &p->children[i];
+#endif
             break;
         }
 
         case NODE48:
-            p.p3 = (art_node48*)n;
-            i = p.p3->keys[c];
+        {
+            art_node48 *p = (art_node48*)n;
+            int i = p->keys[c];
             if (i)
-                return &p.p3->children[i-1];
+                return &p->children[i-1];
             break;
+        }
 
         case NODE256:
-            p.p4 = (art_node256*)n;
-            if (p.p4->children[c])
-                return &p.p4->children[c];
+        {
+            art_node256 *p = (art_node256*)n;
+            if (p->children[c])
+                return &p->children[c];
             break;
+        }
 
         default:
             abort();
@@ -314,7 +366,7 @@ void* art_search(const art_tree *t, const unsigned char *key, int key_len) {
             prefix_len = check_prefix(n, key, key_len, depth);
             if (prefix_len != min(MAX_PREFIX_LEN, n->partial_len))
                 return NULL;
-            depth = depth + n->partial_len;
+            depth += n->partial_len;
         }
 
         // Recursively search
@@ -444,30 +496,18 @@ static void add_child48(art_node48 *n, art_node **ref, unsigned char c, void *ch
 
 static void add_child16(art_node16 *n, art_node **ref, unsigned char c, void *child) {
     if (n->n.num_children < 16) {
-        unsigned mask = (1 << n->n.num_children) - 1;
-        
-        // support non-x86 architectures
+        int idx;
+
 #ifdef __SSE2__
         // Compare the key to all 16 stored keys
-            __m128i cmp = _mm_cmplt_epi8(_mm_set1_epi8(c),
-                    _mm_loadu_si128((__m128i*)n->keys));
+        __m128i cmp = _mm_cmplt_epi8(_mm_set1_epi8(c),
+                _mm_loadu_si128((__m128i*)n->keys));
 
-            // Use a mask to ignore children that don't exist
-            unsigned bitfield = _mm_movemask_epi8(cmp) & mask;
-#else
-            // Compare the key to all 16 stored keys
-            unsigned bitfield = 0;
-            for (short i = 0; i < 16; ++i) {
-                if (c < n->keys[i])
-                    bitfield |= (1 << i);
-            }
-
-            // Use a mask to ignore children that don't exist
-            bitfield &= mask;    
-#endif
+        // Use a mask to ignore children that don't exist
+        uint32_t mask = (1UL << n->n.num_children) - 1;
+        uint32_t bitfield = _mm_movemask_epi8(cmp) & mask;
 
         // Check if less than any
-        unsigned idx;
         if (bitfield) {
             idx = __builtin_ctz(bitfield);
             memmove(n->keys+idx+1,n->keys+idx,n->n.num_children-idx);
@@ -475,6 +515,39 @@ static void add_child16(art_node16 *n, art_node **ref, unsigned char c, void *ch
                     (n->n.num_children-idx)*sizeof(void*));
         } else
             idx = n->n.num_children;
+#elif defined(__ARM_NEON__)
+        // Compare the key to all 16 stored keys
+        uint8x8_t cmp = vshrn_n_u16(vreinterpretq_u16_u8(
+                vcltq_u8(vdupq_n_u8(c), vld1q_u8(n->keys))), 4);
+
+        // Use a mask to ignore children that don't exist
+        uint64_t mask = (n->n.num_children == 16) ?
+                ~0ULL : (1ULL << (n->n.num_children << 2)) - 1;
+        uint64_t bitfield = vget_lane_u64(vreinterpret_u64_u8(cmp), 0) & mask;
+
+        // Check if less than any
+        if (bitfield) {
+#if __LONG_WIDTH__ >= 8
+            idx = __builtin_ctzl(bitfield) >> 2;
+#else
+            idx = __builtin_ctzll(bitfield) >> 2;
+#endif
+            memmove(n->keys+idx+1,n->keys+idx,n->n.num_children-idx);
+            memmove(n->children+idx+1,n->children+idx,
+                    (n->n.num_children-idx)*sizeof(void*));
+        } else
+            idx = n->n.num_children;
+#else
+        // Compare the key to all stored keys
+        for (idx = 0; idx < n->n.num_children; idx++) {
+            if (c < n->keys[idx]) {
+                memmove(n->keys+idx+1, n->keys+idx, n->n.num_children-idx);
+                memmove(n->children+idx+1, n->children+idx,
+                        (n->n.num_children-idx)*sizeof(void*));
+                break;
+            }
+        }
+#endif
 
         // Set the child
         n->keys[idx] = c;
@@ -486,9 +559,8 @@ static void add_child16(art_node16 *n, art_node **ref, unsigned char c, void *ch
 
         // Copy the child pointers and populate the key map
         memcpy(new_node->children, n->children, 16*sizeof(void*));
-        for (int i=0;i<n->n.num_children;i++) {
+        for (int i=0;i<16;i++)
             new_node->keys[n->keys[i]] = i + 1;
-        }
         copy_header((art_node*)new_node, (art_node*)n);
         *ref = (art_node*)new_node;
         free(n);
@@ -499,14 +571,75 @@ static void add_child16(art_node16 *n, art_node **ref, unsigned char c, void *ch
 static void add_child4(art_node4 *n, art_node **ref, unsigned char c, void *child) {
     if (n->n.num_children < 4) {
         int idx;
-        for (idx=0; idx < n->n.num_children; idx++) {
-            if (c < n->keys[idx]) break;
-        }
 
-        // Shift to make room
-        memmove(n->keys+idx+1, n->keys+idx, n->n.num_children - idx);
-        memmove(n->children+idx+1, n->children+idx,
-                (n->n.num_children - idx)*sizeof(void*));
+#if defined(__SSE2__) && defined(FORCE_SSE2)
+        // Compare the key to all 4 stored keys
+        __m128i cmp = _mm_cmplt_epi8(_mm_set1_epi8(c),
+                _mm_cvtsi32_si128(*(int *)n->keys));
+
+        // Use a mask to ignore children that don't exist
+        uint32_t mask = (1 << n->n.num_children) - 1;
+        uint32_t bitfield = _mm_movemask_epi8(cmp) & mask;
+
+        // If we have a match (any bit set) then we can return
+        // the pointer match using ctz to get the index.
+        if (bitfield) {
+            idx = __builtin_ctz(bitfield);
+            // Shift to make room
+            memmove(n->keys+idx+1, n->keys+idx, n->n.num_children-idx);
+            memmove(n->children+idx+1, n->children+idx,
+                    (n->n.num_children-idx)*sizeof(void*));
+        } else
+            idx = n->n.num_children;
+#elif defined(__ARM_NEON__) && defined(FORCE_ARM_NEON)
+        uint8x16_t cmp = vcltq_u8(vdupq_n_u8(c),
+                vreinterpretq_u8_u32( vsetq_lane_u32(
+                        *(uint32_t *)n->keys, vdupq_n_u32(0), 0)));
+
+        uint64_t mask = (((uint64_t)1) << (n->n.num_children << 3)) - 1;
+        uint64_t bitfield = vget_lane_u64(vget_low_u64(
+                vreinterpretq_u64_u8(cmp)), 0) & mask;
+
+        if (bitfield) {
+#if __LONG_WIDTH__ >= 8
+            idx = __builtin_ctzl(bitfield) >> 3;
+#else
+            idx = __builtin_ctzll(bitfield) >> 3;
+#endif
+            // Shift to make room
+            memmove(n->keys+idx+1, n->keys+idx, n->n.num_children-idx);
+            memmove(n->children+idx+1, n->children+idx,
+                    (n->n.num_children-idx)*sizeof(void*));
+        } else
+            idx = n->n.num_children;
+#elif __INT_WIDTH__ >= 4
+        uint64_t cmp = ((0x0001000100010001ULL * c) | 0x1000100010001000ULL) -
+                (((uint64_t)n->keys[0]) | ((uint64_t)n->keys[1]) << 16 |
+                 ((uint64_t)n->keys[2]) << 32 | ((uint64_t)n->keys[3]) << 48);
+        uint64_t mask = (1ULL << (n->n.num_children << 4)) - 1;
+        uint64_t bitfield = ((cmp & 0x1000100010001000ULL) ^ 0x1000100010001000ULL) & mask;
+        if (bitfield) {
+#if __LONG_WIDTH__ >= 8
+            idx = __builtin_ctzl(bitfield) >> 4;
+#else
+            idx = __builtin_ctzll(bitfield) >> 4;
+#endif
+            // Shift to make room
+            memmove(n->keys+idx+1, n->keys+idx, n->n.num_children-idx);
+            memmove(n->children+idx+1, n->children+idx,
+                    (n->n.num_children-idx)*sizeof(void*));
+        } else
+            idx = n->n.num_children;
+#else
+        for (idx=0; idx < n->n.num_children; idx++) {
+            if (c < n->keys[idx]) {
+                memmove(n->keys+idx+1, n->keys+idx, n->n.num_children-idx);
+                memmove(n->children+idx+1, n->children+idx,
+                        (n->n.num_children-idx)*sizeof(void*));
+                break;
+            }
+        }
+#endif
 
         // Insert element
         n->keys[idx] = c;
