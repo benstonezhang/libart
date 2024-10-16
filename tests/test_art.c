@@ -139,6 +139,31 @@ START_TEST(test_art_insert_search)
     l = art_maximum(&t);
     fail_unless(l && strcmp((char*)l->key, "zythum") == 0);
 
+    unsigned char key1[1] = {0};
+    unsigned char key2[2] = {0, 1};
+    unsigned char key3[2] = {0, 0};
+    unsigned value1 = 1, value2 = 2, value3 = 3;
+    art_insert(&t, key1, sizeof(key1), &value1);
+    art_insert(&t, key2, sizeof(key2), &value2);
+    art_insert(&t, key3, sizeof(key3), &value3);
+    uintptr_t val = (uintptr_t)art_search(&t, key1, sizeof(key1));
+    fail_unless((uintptr_t)&value1 == val, "Addr: %" PRIuPTR " Val: %" PRIuPTR "\n",
+            &value1, val);
+    val = (uintptr_t)art_search(&t, key2, sizeof(key2));
+    fail_unless((uintptr_t)&value2 == val, "Addr: %" PRIuPTR " Val: %" PRIuPTR "\n",
+            &value2, val);
+    val = (uintptr_t)art_search(&t, key3, sizeof(key3));
+    fail_unless((uintptr_t)&value3 == val, "Addr: %" PRIuPTR " Val: %" PRIuPTR "\n",
+            &value3, val);
+
+    // Check the minimum
+    l = art_minimum(&t);
+    fail_unless(l && l->key[0] == '\0' && l->key_len == 1);
+
+    // Check the maximum
+    l = art_maximum(&t);
+    fail_unless(l && strcmp((char*)l->key, "zythum") == 0);
+
     res = art_tree_destroy(&t);
     fail_unless(res == 0);
 }
