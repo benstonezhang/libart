@@ -1,24 +1,72 @@
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <stdio.h>
-#include <assert.h>
 #include "art.h"
 
-#ifdef __i386__
-    #include <emmintrin.h>
-#else
-#ifdef __amd64__
-    #include <emmintrin.h>
-#endif
-#endif
+#define MAX_PREFIX_LEN 10
+
+#define NODE4   1
+#define NODE16  2
+#define NODE48  3
+#define NODE256 4
 
 /**
  * Macros to manipulate pointer tags
  */
 #define IS_LEAF(x) (((uintptr_t)x & 1))
 #define SET_LEAF(x) ((void*)((uintptr_t)x | 1))
-#define LEAF_RAW(x) ((art_leaf*)((void*)((uintptr_t)x & ~1)))
+#define LEAF_RAW(x) ((art_leaf*)((void*)((uintptr_t)x >> 1 << 1)))
+
+/**
+ * This struct is included as part of all the various node sizes
+ */
+typedef struct {
+    uint32_t partial_len;
+    uint8_t type;
+    uint8_t num_children;
+    unsigned char partial[MAX_PREFIX_LEN];
+} art_node;
+
+/**
+ * Small node with only 4 children
+ */
+typedef struct {
+    art_node n;
+    unsigned char keys[4];
+    art_node *children[4];
+} art_node4;
+
+/**
+ * Node with 16 children
+ */
+typedef struct {
+    art_node n;
+    unsigned char keys[16];
+    art_node *children[16];
+} art_node16;
+
+/**
+ * Node with 48 children, but
+ * a full 256 byte field.
+ */
+typedef struct {
+    art_node n;
+    unsigned char keys[256];
+    art_node *children[48];
+} art_node48;
+
+/**
+ * Full node with 256 children
+ */
+typedef struct {
+    art_node n;
+    art_node *children[256];
+} art_node256;
+
+#ifdef __SSE2__
+#include <emmintrin.h>
+#elif defined(__ARM_NEON__) && defined(FORCE_ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 /**
  * Allocates a node of the given type,
@@ -26,22 +74,24 @@
  */
 static art_node* alloc_node(uint8_t type) {
     art_node* n;
+    size_t size;
     switch (type) {
         case NODE4:
-            n = (art_node*)calloc(1, sizeof(art_node4));
+            size = sizeof(art_node4);
             break;
         case NODE16:
-            n = (art_node*)calloc(1, sizeof(art_node16));
+            size = sizeof(art_node16);
             break;
         case NODE48:
-            n = (art_node*)calloc(1, sizeof(art_node48));
+            size = sizeof(art_node48);
             break;
         case NODE256:
-            n = (art_node*)calloc(1, sizeof(art_node256));
+            size = sizeof(art_node256);
             break;
         default:
             abort();
     }
+    n = (art_node*)calloc(1, size);
     n->type = type;
     return n;
 }
@@ -157,26 +207,15 @@ static art_node** find_child(art_node *n, unsigned char c) {
             p.p2 = (art_node16*)n;
 
             // support non-86 architectures
-            #ifdef __i386__
+#ifdef __SSE2__
                 // Compare the key to all 16 stored keys
-                __m128i cmp;
-                cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c),
+                __m128i cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c),
                         _mm_loadu_si128((__m128i*)p.p2->keys));
                 
                 // Use a mask to ignore children that don't exist
                 mask = (1 << n->num_children) - 1;
                 bitfield = _mm_movemask_epi8(cmp) & mask;
-            #else
-            #ifdef __amd64__
-                // Compare the key to all 16 stored keys
-                __m128i cmp;
-                cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c),
-                        _mm_loadu_si128((__m128i*)p.p2->keys));
-
-                // Use a mask to ignore children that don't exist
-                mask = (1 << n->num_children) - 1;
-                bitfield = _mm_movemask_epi8(cmp) & mask;
-            #else
+#else
                 // Compare the key to all 16 stored keys
                 bitfield = 0;
                 for (i = 0; i < 16; ++i) {
@@ -187,14 +226,10 @@ static art_node** find_child(art_node *n, unsigned char c) {
                 // Use a mask to ignore children that don't exist
                 mask = (1 << n->num_children) - 1;
                 bitfield &= mask;
-            #endif
-            #endif
+#endif
 
-            /*
-             * If we have a match (any bit set) then we can
-             * return the pointer match using ctz to get
-             * the index.
-             */
+            // If we have a match (any bit set) then we can return
+            // the pointer match using ctz to get the index.
             if (bitfield)
                 return &p.p2->children[__builtin_ctz(bitfield)];
             break;
@@ -412,26 +447,14 @@ static void add_child16(art_node16 *n, art_node **ref, unsigned char c, void *ch
         unsigned mask = (1 << n->n.num_children) - 1;
         
         // support non-x86 architectures
-        #ifdef __i386__
-            __m128i cmp;
-
-            // Compare the key to all 16 stored keys
-            cmp = _mm_cmplt_epi8(_mm_set1_epi8(c),
+#ifdef __SSE2__
+        // Compare the key to all 16 stored keys
+            __m128i cmp = _mm_cmplt_epi8(_mm_set1_epi8(c),
                     _mm_loadu_si128((__m128i*)n->keys));
 
             // Use a mask to ignore children that don't exist
             unsigned bitfield = _mm_movemask_epi8(cmp) & mask;
-        #else
-        #ifdef __amd64__
-            __m128i cmp;
-
-            // Compare the key to all 16 stored keys
-            cmp = _mm_cmplt_epi8(_mm_set1_epi8(c),
-                    _mm_loadu_si128((__m128i*)n->keys));
-
-            // Use a mask to ignore children that don't exist
-            unsigned bitfield = _mm_movemask_epi8(cmp) & mask;
-        #else
+#else
             // Compare the key to all 16 stored keys
             unsigned bitfield = 0;
             for (short i = 0; i < 16; ++i) {
@@ -441,8 +464,7 @@ static void add_child16(art_node16 *n, art_node **ref, unsigned char c, void *ch
 
             // Use a mask to ignore children that don't exist
             bitfield &= mask;    
-        #endif
-        #endif
+#endif
 
         // Check if less than any
         unsigned idx;
@@ -463,8 +485,7 @@ static void add_child16(art_node16 *n, art_node **ref, unsigned char c, void *ch
         art_node48 *new_node = (art_node48*)alloc_node(NODE48);
 
         // Copy the child pointers and populate the key map
-        memcpy(new_node->children, n->children,
-                sizeof(void*)*n->n.num_children);
+        memcpy(new_node->children, n->children, 16*sizeof(void*));
         for (int i=0;i<n->n.num_children;i++) {
             new_node->keys[n->keys[i]] = i + 1;
         }
@@ -491,15 +512,12 @@ static void add_child4(art_node4 *n, art_node **ref, unsigned char c, void *chil
         n->keys[idx] = c;
         n->children[idx] = (art_node*)child;
         n->n.num_children++;
-
     } else {
         art_node16 *new_node = (art_node16*)alloc_node(NODE16);
 
         // Copy the child pointers and the key map
-        memcpy(new_node->children, n->children,
-                sizeof(void*)*n->n.num_children);
-        memcpy(new_node->keys, n->keys,
-                sizeof(unsigned char)*n->n.num_children);
+        memcpy(new_node->children, n->children, 4*sizeof(void*));
+        memcpy(new_node->keys, n->keys, 4*sizeof(unsigned char));
         copy_header((art_node*)new_node, (art_node*)n);
         *ref = (art_node*)new_node;
         free(n);
@@ -546,7 +564,8 @@ static int prefix_mismatch(const art_node *n, const unsigned char *key, int key_
     return idx;
 }
 
-static void* recursive_insert(art_node *n, art_node **ref, const unsigned char *key, int key_len, void *value, int depth, int *old, int replace) {
+static void* recursive_insert(art_node *n, art_node **ref, const unsigned char *key,
+        int key_len, void *value, int depth, int *old, int replace) {
     // If we are at a NULL node, inject a leaf
     if (!n) {
         *ref = (art_node*)SET_LEAF(make_leaf(key, key_len, value));
@@ -642,7 +661,7 @@ RECURSE_SEARCH:;
  */
 void* art_insert(art_tree *t, const unsigned char *key, int key_len, void *value) {
     int old_val = 0;
-    void *old = recursive_insert(t->root, &t->root, key, key_len, value, 0, &old_val, 1);
+    void *old = recursive_insert(t->root, (art_node**)&t->root, key, key_len, value, 0, &old_val, 1);
     if (!old_val) t->size++;
     return old;
 }
@@ -658,7 +677,7 @@ void* art_insert(art_tree *t, const unsigned char *key, int key_len, void *value
  */
 void* art_insert_no_replace(art_tree *t, const unsigned char *key, int key_len, void *value) {
     int old_val = 0;
-    void *old = recursive_insert(t->root, &t->root, key, key_len, value, 0, &old_val, 0);
+    void *old = recursive_insert(t->root, (art_node**)&t->root, key, key_len, value, 0, &old_val, 0);
     if (!old_val) t->size++;
     return old;
 }
@@ -823,7 +842,7 @@ static art_leaf* recursive_delete(art_node *n, art_node **ref, const unsigned ch
  * the value pointer is returned.
  */
 void* art_delete(art_tree *t, const unsigned char *key, int key_len) {
-    art_leaf *l = recursive_delete(t->root, &t->root, key, key_len, 0);
+    art_leaf *l = recursive_delete(t->root, (art_node**)&t->root, key, key_len, 0);
     if (l) {
         t->size--;
         void *old = l->value;

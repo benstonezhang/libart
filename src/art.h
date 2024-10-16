@@ -1,17 +1,11 @@
-#include <stdint.h>
 #ifndef ART_H
 #define ART_H
+
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#define NODE4   1
-#define NODE16  2
-#define NODE48  3
-#define NODE256 4
-
-#define MAX_PREFIX_LEN 10
 
 #if defined(__GNUC__) && !defined(__clang__)
 # if __STDC_VERSION__ >= 199901L && 402 == (__GNUC__ * 100 + __GNUC_MINOR__)
@@ -27,53 +21,6 @@ extern "C" {
 typedef int(*art_callback)(void *data, const unsigned char *key, uint32_t key_len, void *value);
 
 /**
- * This struct is included as part
- * of all the various node sizes
- */
-typedef struct {
-    uint32_t partial_len;
-    uint8_t type;
-    uint8_t num_children;
-    unsigned char partial[MAX_PREFIX_LEN];
-} art_node;
-
-/**
- * Small node with only 4 children
- */
-typedef struct {
-    art_node n;
-    unsigned char keys[4];
-    art_node *children[4];
-} art_node4;
-
-/**
- * Node with 16 children
- */
-typedef struct {
-    art_node n;
-    unsigned char keys[16];
-    art_node *children[16];
-} art_node16;
-
-/**
- * Node with 48 children, but
- * a full 256 byte field.
- */
-typedef struct {
-    art_node n;
-    unsigned char keys[256];
-    art_node *children[48];
-} art_node48;
-
-/**
- * Full node with 256 children
- */
-typedef struct {
-    art_node n;
-    art_node *children[256];
-} art_node256;
-
-/**
  * Represents a leaf. These are
  * of arbitrary size, as they include the key.
  */
@@ -87,7 +34,7 @@ typedef struct {
  * Main struct, points to root.
  */
 typedef struct {
-    art_node *root;
+    void *root;
     uint64_t size;
 } art_tree;
 
